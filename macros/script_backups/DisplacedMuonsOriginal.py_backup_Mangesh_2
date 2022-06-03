@@ -1,0 +1,809 @@
+#! /usr/bin/env python
+
+## **************************************************************** ##
+##  Look at properties of displaced muons from Kalman algo in BMTF  ##
+## **************************************************************** ##
+
+import os
+from math import *
+
+import ROOT as R
+R.gROOT.SetBatch(False)  ## Don't print histograms to screen while processing
+
+PRT_EVT  = 1   ## Print every Nth event
+MAX_EVT  = 100 ## Number of events to process
+VERBOSE  = False  ## Verbose print-out
+
+scale = [1.,1., 2544*11246.]
+
+def getGenEta(Gen_br, i):
+
+	Lxy = sqrt(float(Gen_br.partVx[i])**2 + float(Gen_br.partVy[i])**2)
+	
+	theta1 = 2*atan(exp(-1.*float(Gen_br.partEta[i])))
+
+	z = (700.-Lxy)/tan(theta1)
+
+	theta2 = atan(700./(float(Gen_br.partVz[i])+z))
+
+	if theta2 < 0 : theta2 = pi+theta2
+
+	GenEta = -log(tan(theta2/2.))
+	
+	return GenEta
+
+def getGenPhi(Gen_br, i):
+	x = float(Gen_br.partVx[i])
+	y = float(Gen_br.partVy[i])
+	Lxy = sqrt(x**2 + y**2)
+
+	R = 490.
+
+	alpha = atan(y/x)
+	if y > 0 and x < 0. : alpha = alpha + pi
+	elif y < 0 and x < 0. : alpha = alpha - pi
+	phi = float(Gen_br.partPhi[i])
+
+	GenPhi = asin(Lxy/R*sin(alpha-phi))+phi 
+	return GenPhi
+
+def getPhi(MuonPhi):
+	if (MuonPhi<287.5): phi = MuonPhi/287.5*pi
+	else: phi = (MuonPhi-575.)/287.5*pi
+	return phi
+
+def dPhi(phi1, phi2):
+	return acos(cos(phi1-phi2))
+
+def Isinaccept(vx, vy, vz, pt, eta):
+	
+	if abs(vz) >= 650. : return False
+	
+	Lxy = sqrt(vx**2 + vy**2)
+	if Lxy > 490. : return False
+
+	maxeta = -log(tan(0.5*atan((700.-Lxy)/(650.-vz))))
+	mineta = -log(tan(0.5*(pi-atan((700.-Lxy)/(650.+vz)))))
+
+	if eta >= maxeta or eta <= mineta : return False
+	
+	return True
+
+def dRmin(Emu_br, EmuMu_idx, phi1, eta1):
+
+	dRmin 	= 10.
+	dRmin_idx	= -1.
+
+	for i in EmuMu_idx:
+                ptVtx   = float(Emu_br.tfMuonHwPt[i] - 1)*0.5  ## Vertex-constrained (standard) pT is stored in 0.5 GeV steps
+		phi2 	= getPhi(Emu_br.tfMuonGlobalPhi[i])
+                eta2    = float(Emu_br.tfMuonHwEta[i])*0.010875
+
+		deta = float(eta1-eta2)
+		dR = sqrt(dPhi(phi1, phi2)**2 + deta**2)
+
+		if dR < dRmin:
+			dRmin 		= dR
+			dRmin_idx 	= i
+
+	return dRmin, dRmin_idx
+
+def deltaR(phi1, phi2, eta1, eta2):
+	dphi = dPhi(phi1,phi2)
+	deta = float(eta1-eta2)
+
+	return sqrt(dphi**2 + deta**2)
+
+def getDxy(vx, vy, phi):
+	return abs(vx*sin(phi)-vy*cos(phi))
+
+
+##################################################################################################################
+
+
+def main():
+
+    print '\nInside DisplacedMuons\n'
+    evtclass = ["signal_1500", "signal_3000","NuGun"]
+    evtclassid = 1
+    inputdir = ['/eos/user/s/sonawane/temp/L1Ntuples/signal_1500_tuples/','/eos/user/s/sonawane/temp/L1Ntuples/signal_3000_tuples/','/eos/user/s/sonawane/temp/L1Ntuples/NuGunmod_jobs_12k/ntuples/']
+    workdir = '/afs/cern.ch/user/s/sonawane/L1T/L1studies/L1_scripts_Alberto/L1RunIII/macros/'
+    in_file_names = []
+    for i in range(14):
+        path = inputdir[evtclassid]+str(i)+".root"
+        if not os.path.exists(path): continue
+	in_file_names.append(path)
+    
+    if not os.path.exists(workdir+'plots'): os.makedirs(workdir+'plots')
+
+#	For testing
+#    in_file_names=['/afs/cern.ch/user/s/sonawane/L1T/L1studies/L1_scripts_Alberto/L1RunIII/test/L1Ntuple.root']
+
+    out_file_str = 'DisplacedMuons_'+evtclass[evtclassid]
+    out_file_str += ('_%dk' % (MAX_EVT / 1000))
+    out_file = R.TFile(workdir+'plots/'+out_file_str+'.root','recreate')
+
+    chains = {}
+    chains['Evt'] = []  ## Event info
+    chains['Unp'] = []  ## Unpacked legacy BMTF
+    chains['Emu'] = []  ## Emulated Kalman BMTF
+    chains['Gen'] = []  ## Generator information
+    for i in range(len(in_file_names)):
+        print 'Adding file %s' % in_file_names[i]
+        chains['Evt'].append( R.TChain('l1EventTree/L1EventTree') )
+        chains['Unp'].append( R.TChain('l1UpgradeTfMuonTree/L1UpgradeTfMuonTree') )
+        chains['Emu'].append( R.TChain('l1UpgradeTfMuonEmuTree/L1UpgradeTfMuonTree') )
+        chains['Gen'].append( R.TChain('l1GeneratorTree/L1GenTree') )
+        chains['Evt'][i].Add( in_file_names[i] )
+        chains['Unp'][i].Add( in_file_names[i] )
+        chains['Emu'][i].Add( in_file_names[i] )
+        chains['Gen'][i].Add( in_file_names[i] )
+
+
+    ###################
+    ### Book histograms
+    ###################
+
+    pt_bins  = [100, 0, 50]
+#    chi_bins = [100, 0, 100]
+    dxy_bins = [15,   0, 150]
+    lxy_bins = [10,   0, 150]
+    phi_bins = [80, -4.,4.]
+    dphi_bins = [40, 0., 4.]
+    deta_bins = [30, 0., 3.]
+#    Vx_bins  = [100,-50, 50]
+#    phi_bins = [80, -4, 4]
+
+    h_dxy_blank = R.TH1F('h_dxy_blank', 'Eff for Gen Dxy', dxy_bins[0], dxy_bins[1], dxy_bins[2])
+
+    h_gen_lxy   = R.TH1F('h_gen_lxy',   'Gen Lxy',	dxy_bins[0], dxy_bins[1], dxy_bins[2])
+
+    h_gen_dR 	= R.TH1F('h_gen_dR',	'dR between GenMus', 50, 0, 1.)
+    h_matched_dR 	= R.TH1F('h_matched_dR',	'dR between matched GenMu and EmuMu', 50, 0, 3.)
+
+    h_emu_dxy   = R.TH1F('h_emu_dxy', 	'Emu Dxy',	dxy_bins[0], dxy_bins[1], dxy_bins[2])
+
+    h_eff_gen_dxy   = R.TH1F('h_eff_gen_dxy',   'Eff for Gen Dxy',	dxy_bins[0], dxy_bins[1], dxy_bins[2])
+    h_eff_gen_dxy_pt10   = R.TH1F('h_eff_gen_dxy_pt10',   'Eff for Gen Dxy, pt > 10 GeV',	dxy_bins[0], dxy_bins[1], dxy_bins[2])
+    h_eff_gen_dxy_pt20   = R.TH1F('h_eff_gen_dxy_pt20',   'Eff for Gen Dxy, pt > 20 GeV',	dxy_bins[0], dxy_bins[1], dxy_bins[2])
+    h_eff_gen_dxy_pt30   = R.TH1F('h_eff_gen_dxy_pt30',   'Eff for Gen Dxy, pt > 30 GeV',	dxy_bins[0], dxy_bins[1], dxy_bins[2])
+
+    h_gen_dxy   = R.TH1F('h_gen_dxy',   'Gen Dxy',	dxy_bins[0], dxy_bins[1], dxy_bins[2])
+    h_gen_dxy_pt10 = R.TH1F('h_gen_dxy_pt_10',   'Gen Dxy for pt Thresh 10',	dxy_bins[0], dxy_bins[1], dxy_bins[2])
+    h_gen_dxy_pt20 = R.TH1F('h_gen_dxy_pt_20',   'Gen Dxy for pt Thresh 20',	dxy_bins[0], dxy_bins[1], dxy_bins[2])
+    h_gen_dxy_pt30 = R.TH1F('h_gen_dxy_pt_30',   'Gen Dxy for pt Thresh 30',	dxy_bins[0], dxy_bins[1], dxy_bins[2])
+
+
+    h_gen_pt   = R.TH1F('h_gen_pt',   'Gen Pt',	pt_bins[0], pt_bins[1], pt_bins[2])
+    h_gen_pt_pt10 = R.TH1F('h_gen_pt_pt_10',   'Gen Pt for pt Thresh 10',	pt_bins[0], pt_bins[1], pt_bins[2])
+    h_gen_pt_pt20 = R.TH1F('h_gen_pt_pt_20',   'Gen Pt for pt Thresh 20',	pt_bins[0], pt_bins[1], pt_bins[2])
+
+    h_eff_gen_pt   = R.TH1F('h_eff_pt_dxy',   'Eff for Gen Pt',	pt_bins[0], pt_bins[1], pt_bins[2])
+    h_eff_gen_pt_pt10   = R.TH1F('h_eff_gen_pt_pt10',   'Eff for Gen Pt, pt > 10 GeV',	pt_bins[0], pt_bins[1], pt_bins[2])
+    h_eff_gen_pt_pt20   = R.TH1F('h_eff_gen_pt_pt20',   'Eff for Gen Pt, pt > 20 GeV',	pt_bins[0], pt_bins[1], pt_bins[2])
+    
+    #2D histos 
+    h_gen_dR_Lxy 	= R.TH2F('h_gen_dR_Lxy', 'dR vs Lxy', lxy_bins[0], lxy_bins[1], lxy_bins[2], 50, 0, 1.)
+    h_gen_dphi_pt 	= R.TH2F('h_gen_dphi_pt', 'dPhi vs pt', dphi_bins[0], dphi_bins[1], dphi_bins[2], pt_bins[0], pt_bins[1], pt_bins[2])
+    h_gen_dphi_lxy 	= R.TH2F('h_gen_dphi_lxy', 'dPhi vs Lxy', dphi_bins[0], dphi_bins[1], dphi_bins[2], lxy_bins[0], lxy_bins[1], lxy_bins[2])
+    h_gen_dalphi_pt 	= R.TH2F('h_gen_dalphi_pt', 'dAlPhi vs pt', dphi_bins[0], dphi_bins[1], dphi_bins[2], pt_bins[0], pt_bins[1], pt_bins[2])
+    h_gen_dalphi_lxy 	= R.TH2F('h_gen_dalphi_lxy', 'dAlPhi vs Lxy', dphi_bins[0], dphi_bins[1], dphi_bins[2], lxy_bins[0], lxy_bins[1], lxy_bins[2])
+
+    h_gen_deta_lxy 	= R.TH2F('h_gen_deta_lxy', 'dEta vs Lxy', deta_bins[0], deta_bins[1], deta_bins[2], lxy_bins[0], lxy_bins[1], lxy_bins[2])
+
+    h_gen_phi_phit 	= R.TH2F('h_gen_phi_phit', '#phi vs #phi_{t}', phi_bins[0], phi_bins[1], phi_bins[2], phi_bins[0], phi_bins[1], phi_bins[2])
+    h_gen_alpha_phi 	= R.TH2F('h_gen_alpha_phi', '#alpha vs #phi', phi_bins[0], phi_bins[1], phi_bins[2], phi_bins[0], phi_bins[1], phi_bins[2])
+
+    h_emupt_gendxy	= R.TH2F('h_emupt_gendxy', 'p_{T} vs Dxy', dxy_bins[0], dxy_bins[1], dxy_bins[2], pt_bins[0], pt_bins[1], pt_bins[2])
+
+    h_dimu_dxy_dxy	= R.TH2F('h_dimu_dxy_dxy', 'Dimuon Gen Dxy vs Dxy', dxy_bins[0], dxy_bins[1], dxy_bins[2], dxy_bins[0], dxy_bins[1], dxy_bins[2])
+    h_pass_dimu_dxy_dxy	= R.TH2F('h_pass_dimu_dxy_dxy', 'Dimuon Gen Dxy vs Dxy', dxy_bins[0], dxy_bins[1], dxy_bins[2], dxy_bins[0], dxy_bins[1], dxy_bins[2])
+
+
+#Event counters
+
+    L1_SingleMu20_BMTF 	= 0
+    mucopy_count       	= 0
+    GenMuevt_count 	= 0
+    
+    GenMuCount 		= 0
+    GenMuinAcc		= 0
+
+    EmuMuevt_count 	= 0
+    EmuMus_count		= 0
+    EmuMus_unique_count 		= 0
+
+    matched_gen_mu_count	= 0
+    matched_gen_mu_evt		= 0
+
+    mismatch_evt	= 0
+
+    iEvt = 0 
+
+    L1_thresh = 0.
+
+    DiMu_evt = 0.
+    DiMuons  = 0.
+
+    pass_DiMu_evt = 0.
+    pass_DiMuons  = 0.
+
+    print '\nEntering loop over chains'
+    for iCh in range(len(chains['Emu'])):
+
+        if iEvt >= MAX_EVT: break
+
+        ## Faster tecnhique, inspired by https://github.com/thomreis/l1tMuonTools/blob/master/L1Analysis.py
+        Evt_br = R.L1Analysis.L1AnalysisEventDataFormat()
+        Unp_br = R.L1Analysis.L1AnalysisL1UpgradeTfMuonDataFormat()
+        Emu_br = R.L1Analysis.L1AnalysisL1UpgradeTfMuonDataFormat()
+        Gen_br = R.L1Analysis.L1AnalysisGeneratorDataFormat()
+#        Kmt_br = R.L1Analysis.L1AnalysisBMTFOutputDataFormat()
+
+        chains['Evt'][iCh].SetBranchAddress('Event',               R.AddressOf(Evt_br))
+        chains['Unp'][iCh].SetBranchAddress('L1UpgradeBmtfMuon',   R.AddressOf(Unp_br))
+        chains['Emu'][iCh].SetBranchAddress('L1UpgradeKBmtfMuon',  R.AddressOf(Emu_br))
+        chains['Gen'][iCh].SetBranchAddress('Generator',           R.AddressOf(Gen_br))
+#        chains['Emu'][iCh].SetBranchAddress('L1UpgradeBmtfOutput', R.AddressOf(Kmt_br))
+
+	
+
+        print '\nEntering loop over events for chain %d' % iCh
+        for jEvt in range(chains['Emu'][iCh].GetEntries()):
+
+	    L1_SingleMu20_BMTF_flag = False
+
+            if iEvt >= MAX_EVT: break
+
+	    iEvt +=1
+
+            if iEvt % PRT_EVT is 0: print '\nEvent # %d (%dth in chain)' % (iEvt, jEvt+1)
+
+            chains['Evt'][iCh].GetEntry(jEvt)
+            chains['Unp'][iCh].GetEntry(jEvt)
+            chains['Emu'][iCh].GetEntry(jEvt)
+            chains['Gen'][iCh].GetEntry(jEvt)
+
+            # ## Use these lines if you don't explicitly define the DataFormat and then do SetBranchAddress above
+            # Evt_br = chains['Evt'][iCh].Event
+            # Unp_br = chains['Unp'][iCh].L1UpgradeBmtfMuon
+            # Emu_br = chains['Emu'][iCh].L1UpgradeBmtfMuon
+
+            if iEvt % PRT_EVT is 0: print '  * Run %d, LS %d, event %d' % (int(Evt_br.run), int(Evt_br.lumi), int(Evt_br.event))
+
+            nUnpMu = int(Unp_br.nTfMuons)
+            nEmuMu = int(Emu_br.nTfMuons)
+	    nGenPart = int(Gen_br.nPart)
+#            nKmtMu = int(Kmt_br.nTrks)
+	    
+	    ##########################
+            ###  Index containers  ###
+            ##########################
+	    
+  	    GenMus			=[]
+	    GenMus_acc	 		=[]
+	    EmuMus			=[]
+	    EmuMus_unique		=[]
+	    GenMuPt_acc			=[]
+	
+	    #########################################
+            ###  Generator information for muons  ###
+            #########################################
+
+	    for i in range(nGenPart):
+	
+		if (abs(Gen_br.partId[i])!=13): continue
+		if (Gen_br.partStat[i]!=1): continue
+		
+		if (Gen_br.partParent[i]!=6000113): continue
+
+		GenMus.append(i)
+		
+		if not Isinaccept(Gen_br.partVx[i], Gen_br.partVy[i], Gen_br.partVz[i], Gen_br.partPt[i], Gen_br.partEta[i]): continue
+		
+		GenMus_acc.append(i)
+		GenMuPt_acc.append([Gen_br.partPt[i], i])
+		
+		dxy = getDxy(float(Gen_br.partVx[i]), float(Gen_br.partVy[i]), float(Gen_br.partPhi[i]))
+		pt  = float(Gen_br.partPt[i])
+		h_gen_pt.Fill(pt)
+		if Gen_br.partPt[i] > 0. :
+			h_gen_dxy.Fill(dxy)
+#		if Gen_br.partPt[i] > 10. :
+			h_gen_dxy_pt10.Fill(dxy)
+			h_gen_pt_pt10.Fill(pt)
+#		if Gen_br.partPt[i] > 20. :
+			h_gen_dxy_pt20.Fill(dxy)
+			h_gen_pt_pt20.Fill(pt)
+#		if Gen_br.partPt[i] > 30. :
+			h_gen_dxy_pt30.Fill(dxy)
+
+	    GenMuPt_acc.sort(reverse=True)
+
+            #################################
+            ###  Unpacked (legacy) muons  ###
+            #################################
+            for i in range(nUnpMu):
+                BX      = int(Unp_br.tfMuonBx[i])
+                qual    = int(Unp_br.tfMuonHwQual[i])
+                ptVtx   = float(Unp_br.tfMuonHwPt[i] - 1)*0.5   ## Vertex-constrained (standard) pT is stored in 0.5 GeV steps
+#                ptDispl = float(Unp_br.tfMuonHwPtUnconstrained[i] - 1)  ## Is there an offset by 1 for displaced muons? - AWB 2019.05.29, ALB: it is empty.
+                eta     = float(Unp_br.tfMuonHwEta[i])*0.010875
+                
+                if (BX  !=  0): continue
+                if (qual < 12): continue
+		if (ptVtx>=20. and abs(eta)<0.83): 
+			L1_SingleMu20_BMTF_flag = True
+
+
+            #################################
+            ###  Emulated (Kalman) muons  ###
+            #################################
+
+	    mucopy_flag = False		
+		
+            for i in range(nEmuMu):
+                BX      = int(Emu_br.tfMuonBx[i])
+                qual    = int(Emu_br.tfMuonHwQual[i])
+                ptVtx   = float(Emu_br.tfMuonHwPt[i] - 1)*0.5  ## Vertex-constrained (standard) pT is stored in 0.5 GeV steps
+#                dxy     = float(Emu_br.tfMuonHwDxy[i]) 
+#                ptDispl = float(Emu_br.tfMuonHwPtUnconstrained[i])    ## Is there an offset by 1 for displaced muons? - AWB 2019.05.29
+                eta     = float(Emu_br.tfMuonHwEta[i])*0.010875
+		phi     = getPhi(Emu_br.tfMuonGlobalPhi[i])
+                                
+                if (BX  !=  0): continue
+                if (qual < 12): continue
+
+		EmuMus.append(i)
+
+		savemuindex = i
+		ptmax = -1.
+		
+		for j in range(i+1, nEmuMu):
+#			pt_j   = float(Emu_br.tfMuonHwPt[j] - 1)*0.5
+			pt_j   = float(Emu_br.tfMuonHwPtUnconstrained[j])
+			eta_j  = float(Emu_br.tfMuonHwEta[j])*0.010875
+			phi_j  = getPhi(Emu_br.tfMuonGlobalPhi[j])
+
+			if (eta == eta_j and phi == phi_j):
+				mucopy_flag = True
+				
+				if (ptmax < pt_j): 
+					ptmax = pt_j
+					savemuindex = j
+				else :	savemuindex = i
+
+		if i != savemuindex: continue
+	
+		EmuMus_unique.append(i)
+
+	    #Flagging events with nearly identical Emulated muons
+	    if mucopy_flag:
+		mucopy_count +=1 
+	    #Plotting dR between Gen Muon and corrected Gen Muon.
+
+	    for i in GenMus_acc:
+		phi1 = float(Gen_br.partPhi[i])
+		eta1 = float(Gen_br.partEta[i])
+		phi2 = getGenPhi(Gen_br, i)
+#		phi2 = phi1
+		eta2 = getGenEta(Gen_br, i)
+		pt = float(Gen_br.partPt[i])
+
+		dR = deltaR(phi1, phi2, eta1, eta2) 
+		dphi = dPhi(phi1, phi2)
+
+		y = float(Gen_br.partVy[i])
+		x = float(Gen_br.partVx[i])
+
+		alpha = atan(y/x)
+		if y > 0. and x < 0. : alpha = alpha + pi
+		elif y < 0. and x < 0. : alpha = alpha - pi
+		dAlphi = dPhi(alpha, phi2)
+	
+		h_gen_dphi_pt.Fill(dphi, pt)
+		h_gen_dalphi_pt.Fill(dAlphi, pt)
+		h_gen_phi_phit.Fill(phi1, phi2)
+		h_gen_alpha_phi.Fill(phi1, alpha)
+
+		h_gen_dR.Fill(dR)
+		Lxy = sqrt(Gen_br.partVx[i]**2+Gen_br.partVy[i]**2)
+		
+		h_gen_dphi_lxy.Fill(dphi, Lxy)
+		h_gen_dalphi_lxy.Fill(dAlphi, Lxy)
+
+		deta = abs(eta1 - eta2)
+		h_gen_deta_lxy.Fill(deta, Lxy)
+
+		h_gen_dR_Lxy.Fill(Lxy, dR)
+
+	    # Better matching subroutine
+
+	    dR_list=[]
+	    dR_list_corr=[]
+
+	    for i in GenMus_acc:
+		phi1 = float(Gen_br.partPhi[i])
+		eta1 = float(Gen_br.partEta[i])
+
+		phi1corr = getGenPhi(Gen_br, i)
+		eta1corr = getGenEta(Gen_br, i)
+		for j in EmuMus_unique:
+			eta2 = float(Emu_br.tfMuonHwEta[j])*0.010875
+			phi2 = getPhi(Emu_br.tfMuonGlobalPhi[j])
+	
+			dR = deltaR(phi1, phi2, eta1, eta2)
+			if dR < 0.5: dR_list.append([dR, i, j])
+			dR_corr = deltaR(phi1, phi2, eta1corr, eta2)
+			if dR_corr < 0.5: dR_list_corr.append([dR_corr, i, j])
+
+#	    mismatch_flag = False
+
+#	    if len(dR_list):
+
+#		    print 'Unsorted list:\n', dR_list
+#		    print 'Corrected Unsorted list:\n', dR_list_corr
+#		    dR_list.sort()
+#		    dR_list_corr.sort()
+#		    print 'Sorted list:\n', dR_list
+#		    print 'Corrected Sorted list:\n', dR_list_corr
+
+#		    for i in range(len(dR_list)):
+#			k = dR_list[i]
+#			l = dR_list_corr[i]
+#			if k[1]==l[1] and k[2]==l[2]: continue
+#			mismatch_flag = True
+	    
+#	    if mismatch_flag : mismatch_evt +=1
+
+	    dR_list = dR_list_corr
+
+	    k = False
+	    if len(dR_list): k = True
+	    i = 0
+	    while k:
+		k = False
+		idx1 = dR_list[i][1]
+		idx2 = dR_list[i][2]
+		j = i+1
+		while j < len(dR_list):
+			idx_1  = dR_list[j][1]
+			idx_2  = dR_list[j][2]
+
+			if idx1 == idx_1 or idx2 == idx_2: del dR_list[j]
+			else : j +=1
+	  	i +=1
+		if i < len(dR_list): 
+			k = True
+
+	    print 'Cleaned sorted dR_list: '
+	    print dR_list
+
+	    #Dxy, pt for matched gen muon
+	    for i in range(len(dR_list)):
+		Emu_idx = dR_list[i][2]
+		ptVtx 	= float(Emu_br.tfMuonHwPt[Emu_idx] - 1)*0.5
+		ptDispl	= float(Emu_br.tfMuonHwPtUnconstrained[Emu_idx])
+
+		pt =  max(ptDispl, ptVtx)
+		idx	= dR_list[i][1]
+		dR  	= dR_list[i][0]
+		dxy 	= getDxy(float(Gen_br.partVx[idx]), float(Gen_br.partVy[idx]), float(Gen_br.partPhi[idx]))
+		h_matched_dR.Fill(dR)
+		matched_gen_mu_count+=1
+		pt_gen = float(Gen_br.partPt[idx])
+		if pt :
+			if pt_gen > 0. : 
+				h_eff_gen_dxy.Fill(dxy)
+				h_emupt_gendxy.Fill(dxy, pt)
+			h_eff_gen_pt.Fill(pt_gen)
+		if pt > 10. :
+#			if pt_gen > 10. : 
+			h_eff_gen_dxy_pt10.Fill(dxy)
+			h_eff_gen_pt_pt10.Fill(pt_gen)
+		if pt > 20. :
+#			if pt_gen > 20. : 
+			h_eff_gen_dxy_pt20.Fill(dxy)
+			h_eff_gen_pt_pt20.Fill(pt_gen)
+
+		if pt > 30. :
+#			if pt_gen > 30. : 
+			h_eff_gen_dxy_pt30.Fill(dxy)
+
+	    #Efficiency for Double Muons
+#	    dim_idx1 = GenMuPt_acc[0][1]
+#	    dim_idx2 = GenMuPt_acc[1][1]
+#	    dxy1 = getDxy(float(Gen_br.partVx[dim_idx1]), float(Gen_br.partVy[dim_idx1]), float(Gen_br.partPhi[dim_idx1]))
+#	    dxy2 = getDxy(float(Gen_br.partVx[dim_idx2]), float(Gen_br.partVy[dim_idx2]), float(Gen_br.partPhi[dim_idx2]))
+
+#	    if GenMuPt_acc[0][0] < 15. or GenMuPt_acc[1][0] < 7. : continue
+
+	    for i in range(len(dxy_bins)):
+		for j in range(len(dxy_bins)):
+			if dxy1 > 10.*i and if dxy2 > 10.*j :	h_dimu_dxy_dxy.SetBinContent(i+1, j+1, 1.)
+
+	    matched_pt_dim_list = [] 
+	    for i in range(len(dR_list)):
+		emu_idx = dR_list[i][2]
+		pt = float(Emu_br.tfMuonHwPtUnconstrained[emu_idx])
+		matched_pt_dim_list.append(pt, emu_idx, dR_list[i][1])
+
+	    if len(matched_dim_list) < 2 : continue
+
+	    matched_dim_list.sort(reverse=True)
+	    
+	    print "Matched_dim_list size : ", len(matched_dim_list)
+	
+#	    emu_idx1 = matched_dim_list[0][2]
+#	    emu_idx2 = matched_dim_list[1][2]
+
+	    emu_pt1 = matched_dim_list[0][0]
+	    emu_pt2 = matched_dim_list[1][0] 
+
+	    if (emu_pt1, emu_pt2) > 15. and min(emu_pt1, emu_pt2 > 7.) :
+		h_pass_dimu_dxy_dxy.Fill(dxy1, dxy2)
+		pass_DiMu_evt += 1
+	  
+
+	    ##End of sub loop over Gen, Emu or Unp muons
+
+	    print "GenMus: ", len(GenMus)
+	    print "GenMusAcc: ", len(GenMus_acc)
+	    print "EmuMus: ", len(EmuMus)
+	    print "EmuMus unique: ", len(EmuMus_unique)
+	
+	    ###########################
+            ###  Updating counters  ###
+            ###########################
+ 	    
+	    if (L1_SingleMu20_BMTF_flag): L1_SingleMu20_BMTF +=1
+
+	    if len(GenMus) : GenMuevt_count +=1
+	    GenMuCount += len(GenMus)
+	    GenMuinAcc += len(GenMus_acc)
+
+	    if len(EmuMus) : EmuMuevt_count +=1
+	    EmuMus_count += len(EmuMus)
+
+	    EmuMus_unique_count +=len(EmuMus_unique)
+
+	    if len(dR_list) : matched_gen_mu_evt +=1
+
+        ## End loop: for jEvt in range(chains['Unp'][iCh].GetEntries()):
+    ## End loop: for iCh in range(len(chains['Unp'])):
+
+    print '\nFinished loop over chains'
+
+    out_file.cd()
+
+    h_gen_dR.SetLineWidth(2)
+    h_gen_dR.Write()
+
+    h_gen_dxy.SetLineWidth(2)
+    h_gen_dxy.Write()
+    
+    h_gen_pt.SetLineWidth(2)
+    h_gen_pt.Write()
+
+    h_gen_dR_Lxy.SetStats(0)
+    h_gen_dR_Lxy.Write()
+
+    h_eff_gen_dxy.Sumw2()
+    h_Teff_gen_dxy = R.TEfficiency(h_eff_gen_dxy, h_gen_dxy)
+    h_eff_gen_dxy.Divide(h_eff_gen_dxy, h_gen_dxy, 1.,1., "B")
+    h_Teff_gen_dxy.SetLineWidth(2)
+    h_eff_gen_dxy.SetLineWidth(2)
+    h_eff_gen_dxy.Write()
+
+    h_eff_gen_dxy_pt10.Sumw2()
+    h_Teff_gen_dxy_pt10 = R.TEfficiency(h_eff_gen_dxy_pt10, h_gen_dxy_pt10)
+    h_eff_gen_dxy_pt10.Divide(h_eff_gen_dxy_pt10, h_gen_dxy_pt10, 1., 1., "B")
+    h_Teff_gen_dxy_pt10.SetLineWidth(2)
+    h_eff_gen_dxy_pt10.SetLineWidth(2)
+    h_eff_gen_dxy_pt10.Write()
+
+    h_eff_gen_dxy_pt20.Sumw2()
+    h_Teff_gen_dxy_pt20 = R.TEfficiency(h_eff_gen_dxy_pt20, h_gen_dxy_pt20)
+    h_eff_gen_dxy_pt20.Divide(h_eff_gen_dxy_pt20, h_gen_dxy_pt20, 1., 1., "B")
+    h_Teff_gen_dxy_pt20.SetLineWidth(2)
+    h_eff_gen_dxy_pt20.SetLineWidth(2)
+    h_eff_gen_dxy_pt20.Write()
+    
+    h_eff_gen_dxy_pt30.Sumw2()
+    h_Teff_gen_dxy_pt30 = R.TEfficiency(h_eff_gen_dxy_pt30, h_gen_dxy_pt30)
+    h_eff_gen_dxy_pt30.Divide(h_eff_gen_dxy_pt30, h_gen_dxy_pt30, 1., 1., "B")
+    h_Teff_gen_dxy_pt30.SetLineWidth(2)
+    h_eff_gen_dxy_pt30.SetLineWidth(2)
+    h_eff_gen_dxy_pt30.Write()
+
+    h_Teff_dimu_dxy_dxy = R.TEfficiency(h_pass_dimu_dxy_dxy, h_dimu_dxy_dxy)
+    h_Teff_dimu_dxy_dxy.SetLineWidth(2)
+	
+    h_pass_dimu_dxy_dxy.Sumw2()
+    h_pass_dimu_dxy_dxy.Divide(h_pass_dimu_dxy_dxy, h_dimu_dxy_dxy, 1., 1., "B")
+
+    h_eff_gen_pt.Sumw2()
+    h_eff_gen_pt.Divide(h_eff_gen_pt, h_gen_pt, 1.,1., "B")
+    h_eff_gen_pt.SetLineWidth(2)
+    h_eff_gen_pt.Write()
+
+    h_eff_gen_pt_pt10.Sumw2()
+    h_eff_gen_pt_pt10.Divide(h_eff_gen_pt_pt10, h_gen_pt, 1.,1., "B")
+    h_eff_gen_pt_pt10.SetLineWidth(2)
+    h_eff_gen_pt_pt10.Write()
+
+    h_eff_gen_pt_pt20.Sumw2()
+    h_eff_gen_pt_pt20.Divide(h_gen_pt, h_eff_gen_pt_pt20, 1., 1., "B")
+    h_eff_gen_pt_pt20.SetLineWidth(2)
+    h_eff_gen_pt_pt20.Write()
+
+    h_matched_dR.SetLineWidth(2)
+    h_matched_dR.Write()
+    
+    h_Teff_gen_dxy.Write()
+    h_Teff_gen_dxy_pt10.Write()
+    h_Teff_gen_dxy_pt20.Write()
+    h_Teff_gen_dxy_pt30.Write()
+    h_Teff_dimu_dxy_dxy.Write()
+
+    h_emupt_gendxy.Write()
+    h_gen_dphi_pt.Write()
+    h_gen_dalphi_pt.Write()
+    h_gen_dphi_lxy.Write()
+    h_gen_deta_lxy.Write()
+    h_gen_dalphi_lxy.Write()
+    h_gen_phi_phit.Write()
+    h_gen_alpha_phi.Write()
+    h_dimu_dxy_dxy.Write()
+    h_pass_dimu_dxy_dxy.Write()
+
+    #making plots
+    c1 = R.TCanvas("c1","Eff",800,600)
+    h_eff_gen_dxy.SetStats(0)
+#    h_eff_gen_dxy.GetXaxis().SetTitle("Gen Dxy [cm]")
+#    h_eff_gen_dxy.GetYaxis().SetTitle("Efficiency")
+#    h_eff_gen_dxy.GetYaxis().SetRangeUser(0,1.02)
+
+    h_Teff_gen_dxy.SetLineColor(R.kBlack)
+    h_Teff_gen_dxy.SetMarkerStyle(20)
+    h_Teff_gen_dxy.SetMarkerColor(R.kBlack)
+
+    h_Teff_gen_dxy_pt10.SetLineColor(R.kBlue)
+    h_Teff_gen_dxy_pt10.SetMarkerStyle(20)
+    h_Teff_gen_dxy_pt10.SetMarkerColor(R.kBlue)
+
+    h_Teff_gen_dxy_pt20.SetLineColor(R.kRed)
+    h_Teff_gen_dxy_pt20.SetMarkerStyle(20)
+    h_Teff_gen_dxy_pt20.SetMarkerColor(R.kRed)
+
+    h_Teff_gen_dxy_pt30.SetLineColor(R.kGreen)
+    h_Teff_gen_dxy_pt30.SetMarkerStyle(20)
+    h_Teff_gen_dxy_pt30.SetMarkerColor(R.kGreen)
+
+    h_dxy_blank.SetMaximum(1.02)
+    h_dxy_blank.SetStats(0)
+    h_dxy_blank.GetXaxis().SetTitle("Gen Dxy [cm]")
+    h_dxy_blank.GetYaxis().SetTitle("Efficiency")
+    h_dxy_blank.Draw()
+
+    h_Teff_gen_dxy.Draw("same")
+    h_Teff_gen_dxy_pt10.Draw("same")
+    h_Teff_gen_dxy_pt20.Draw("same")
+    h_Teff_gen_dxy_pt30.Draw("same")
+
+    leg = R.TLegend(0.5,0.6,0.7,0.8)
+    leg.AddEntry(h_Teff_gen_dxy, "L1 P_{T} > 0 GeV", "p")
+    leg.AddEntry(h_Teff_gen_dxy_pt10, "L1 P_{T} > 10 GeV","p")
+    leg.AddEntry(h_Teff_gen_dxy_pt20, "L1 P_{T} > 20 GeV","p")
+    leg.AddEntry(h_Teff_gen_dxy_pt30, "L1 P_{T} > 30 GeV","p")
+    leg.SetLineWidth(0)
+    leg.Draw("same")
+
+    c1.Write()
+
+    c2 = R.TCanvas("c2","Eff",800,600)
+    h_eff_gen_dxy.SetStats(0)
+    h_eff_gen_dxy.GetXaxis().SetTitle("Gen Dxy [cm]")
+    h_eff_gen_dxy.GetYaxis().SetTitle("Efficiency")
+    h_eff_gen_dxy.GetYaxis().SetRangeUser(0,1.02)
+
+    h_eff_gen_dxy.SetLineColor(R.kBlack)
+    h_eff_gen_dxy_pt10.SetLineColor(R.kBlue)
+    h_eff_gen_dxy_pt20.SetLineColor(R.kRed)
+    h_eff_gen_dxy_pt30.SetLineColor(R.kGreen)
+
+    h_eff_gen_dxy.Draw()
+    h_eff_gen_dxy_pt10.Draw("same")
+    h_eff_gen_dxy_pt20.Draw("same")
+    h_eff_gen_dxy_pt30.Draw("same")
+
+    leg = R.TLegend(0.5,0.6,0.7,0.8)
+    leg.AddEntry(h_eff_gen_dxy, "L1 P_{T} > 0 GeV")
+    leg.AddEntry(h_eff_gen_dxy_pt10, "L1 P_{T} > 10 GeV")
+    leg.AddEntry(h_eff_gen_dxy_pt20, "L1 P_{T} > 20 GeV")
+    leg.AddEntry(h_eff_gen_dxy_pt30, "L1 P_{T} > 30 GeV")
+    leg.SetLineWidth(0)
+    leg.Draw("same")
+
+    c2.Write()
+
+    out_file.Close()
+    del chains
+
+    print '\nWrote out file: plots/'+out_file_str+'.root'
+    print '\n Events run over: ', iEvt
+    print 'Number of L1_SingleMu20_BMTF: ', L1_SingleMu20_BMTF, '\t rate: ', float(L1_SingleMu20_BMTF)*scale[evtclassid]/iEvt
+
+    print 'Event counter'
+    print 'Total GenMus: ', GenMuCount
+    print 'GenMus in Acceptance: ', GenMuinAcc
+    print 'EmuMus passing qual: ', EmuMus_count
+    print 'EmuMus passing qual and unique: ', EmuMus_unique_count
+    print 'Events with non-unique EmuMus: ', mucopy_count
+    
+    print 'Mismatch between corr and uncorr Gen Muons matched to qual emus: ', mismatch_evt
+
+    print 'Matched gen mus : ', matched_gen_mu_count
+    print 'Events with matched gen Mus: ', matched_gen_mu_evt
+
+    print 'Events with Gen Dimuons passing cuts : ', DiMu_evt
+    print 'Events with Emu Dimuons passing cuts : ', pass_DiMu_evt
+
+if __name__ == '__main__':
+    main()
+
+
+
+#                h_pt_displ_emu.Fill( min( max( ptDispl+0.01, pt_bins[1]+0.01), pt_bins[2]-0.01) )
+#    h_pt_vtx_unp   = R.TH1F('h_pt_vtx_unp',   'Legacy BMTF vertex-constrained pT spectrum',         pt_bins[0], pt_bins[1], pt_bins[2])
+#    h_pt_vtx_emu   = R.TH1F('h_pt_vtx_emu',   'Kalman BMTF vertex-constrained pT spectrum',         pt_bins[0], pt_bins[1], pt_bins[2])
+#    h_phi_mu_emu   = R.TH1F('h_phi_mu_emu',   'Kalman BMTF muon Phi',         		phi_bins[0], phi_bins[1], phi_bins[2])
+#    h_pt_displ_emu = R.TH1F('h_pt_displ_emu', 'Kalman BMTF non-vertex-constrained pT spectrum',     pt_bins[0], pt_bins[1], pt_bins[2])
+#    h_pt_dxy_emu   = R.TH2F('h_pt_dxy_emu',   'Kalman BMTF non-vertex-constrained pT vs dxy',       pt_bins[0], pt_bins[1], pt_bins[2], dxy_bins[0], dxy_bins[1], dxy_bins[2])
+#    h_pt_displ_kmt = R.TH1F('h_pt_displ_kmt', 'Internal Kalman non-vertex-constrained pT spectrum', pt_bins[0], pt_bins[1], pt_bins[2])
+#    h_chi2_kmt = R.TH1F('h_chi2_kmt', 'Kalman BMTF track #chi^{2} distribution', chi_bins[0], chi_bins[1], chi_bins[2])
+
+ #   h_Vx_gen = R.TH1F('h_Vx_gen', 'Generator level Vertex x coordinate',     Vx_bins[0], Vx_bins[1], Vx_bins[2])
+
+#    h_pt_vtx_unp.SetLineWidth(2)
+#    h_pt_vtx_unp.SetLineColor(R.kBlack)
+#    h_pt_vtx_unp.Write()
+    
+            ######################################
+            ###  Extra info from Kalman muons  ###
+            ######################################
+            #Alberto, is this deprecated in CMSW11?
+            #for i in range(nKmtMu):
+            #    BX      = int(Kmt_br.bx[i])
+            #    qual    = int(Kmt_br.quality[i])
+            #    ptVtx   = -1
+            #    ptDispl = float(Kmt_br.ptUnconstrained[i])  ## Is there an offset by 1 for displaced muons? - AWB 2019.05.29
+            #    eta     = float(Kmt_br.coarseEta[i])*0.010875
+            #    chi2    = float(Kmt_br.approxChi2[i])
+            #    if VERBOSE: print 'Internal muon %d BX = %d, qual = %d, ptVtx = %.1f, ptDispl = %.1f, eta = %.2f' % (i, BX, qual, ptVtx, ptDispl, eta)
+                
+            #    if (BX  !=  0): continue
+                # if (qual < 12): continue  ## Quality assignment not the same as uGMT quality
+
+            #    h_pt_displ_kmt.Fill( min( max( ptDispl, pt_bins[1]+0.01), pt_bins[2]-0.01) )
+            #    h_chi2_kmt    .Fill( min( max( chi2,   chi_bins[1]+0.01), chi_bins[2]-0.01) )
+
+#    c2 = R.TCanvas("c2","Eff",800,600)
+#    h_eff_gen_pt.SetStats(0)
+#    h_eff_gen_pt.GetXaxis().SetTitle("Gen P_{T} [GeV]")
+#    h_eff_gen_pt.GetYaxis().SetTitle("Efficiency")
+#    h_eff_gen_pt.GetYaxis().SetRangeUser(0,1.02)
+
+#    h_eff_gen_pt_pt10.SetLineColor(R.kBlue)
+#    h_eff_gen_pt_pt20.SetLineColor(R.kRed)
+
+#    h_eff_gen_pt.Draw()
+#    h_eff_gen_pt_pt10.Draw("same")
+#    h_eff_gen_pt_pt20.Draw("same")
+
+#    leg = R.TLegend(0.5,0.6,0.7,0.8)
+#    leg.AddEntry("h_eff_gen_pt", "L1 P_{T} > 0 GeV")
+#    leg.AddEntry("h_eff_gen_pt_pt10", "L1 P_{T} > 10 GeV")
+#    leg.AddEntry("h_eff_gen_pt_pt20", "L1 P_{T} > 20 GeV")
+#    leg.SetLineWidth(0)
+#    leg.Draw("same")
